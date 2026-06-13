@@ -1,0 +1,14 @@
+{
+    "maxToolRounds": 300,
+    "maxToolRoundsPerTurn": 16,
+    "maxToolCallsPerTurn": 20,
+    "maxSameToolRepeat": 2,
+    "maxEmptyReplyRetries": 8,
+    "contextCompressTriggerPercent": 75,
+    "contextKeepRecentPercent": 20,
+    "contextThresholdPercent": 90,
+    "terminalEnabled": true,
+    "terminalTimeoutMs": 120000,
+    "terminalMaxOutputChars": 32000,
+    "visionMaxImageBytes": 5242880
+}

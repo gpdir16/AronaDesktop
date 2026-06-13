@@ -1,0 +1,60 @@
+{
+    "mixDuration": 0.2,
+    "tracks": {
+        "body": 0,
+        "face": 1,
+        "overlay": 2,
+        "move": 3
+    },
+    "idle": {
+        "body": "Idle_01",
+        "face": "00",
+        "resetAfterMs": 4000
+    },
+    "blink": {
+        "name": "Eye_Close_01",
+        "intervalMs": {
+            "min": 2200,
+            "max": 4800
+        }
+    },
+    "talk": {
+        "name": "31"
+    },
+    "expressions": [
+        { "name": "00", "label": "기본" },
+        { "name": "04", "label": "약간 더 놀람" },
+        { "name": "05", "label": "화남" },
+        { "name": "06", "label": "슬픔" },
+        { "name": "07", "label": "정색" },
+        { "name": "10", "label": "한숨" },
+        { "name": "11", "label": "사랑" },
+        { "name": "12", "label": "행복" },
+        { "name": "13", "label": "행복한 눈감음" },
+        { "name": "14", "label": "삐짐" },
+        { "name": "15", "label": "으..." },
+        { "name": "16", "label": "놀람" },
+        { "name": "17", "label": "방황" },
+        { "name": "18", "label": "귀여운 슬픔" },
+        { "name": "19", "label": "놀란 정색" },
+        { "name": "21", "label": "입맛다시기" },
+        { "name": "22", "label": "반짝이는 눈" },
+        { "name": "23", "label": "행복한 눈감음 + 침흘림" },
+        { "name": "25", "label": "결심" },
+        { "name": "29", "label": "어지러움" }
+    ],
+    "sequences": {
+        "look": {
+            "label": "갸우뚱",
+            "holdMs": 700,
+            "start": { "overlay": "Look_01_A", "move": "Look_01_M" },
+            "end": { "overlay": "LookEnd_01_A", "move": "LookEnd_01_M" }
+        },
+        "pat": {
+            "label": "살짝 웃음",
+            "holdMs": 500,
+            "start": { "overlay": "Pat_01_A", "move": "Pat_01_M" },
+            "end": { "overlay": "PatEnd_01_A", "move": "PatEnd_01_M" }
+        }
+    }
+}

@@ -1,0 +1,369 @@
+import { loadAgentConfig } from "../config-loader.js";
+import { createLlmClient } from "../llm/client.js";
+import { assistantMessageToPlain } from "../llm/messages.js";
+import { executeTool, getAllToolDefinitions, toolResultContent } from "./tool-registry.js";
+import { extractTurnMessages } from "./chat-history.js";
+import { ensureWithinContextLimit } from "./summarize.js";
+import { countMessagesTokens } from "./context.js";
+function parseToolArgs(raw) {
+    try {
+        return JSON.parse(raw || "{}");
+    } catch {
+        return {};
+    }
+}
+
+function buildStats(llm, messages, contextBaseLength, toolCallCount, modelCallCount) {
+    const model = llm.provider.model;
+    const contextWindow = llm.modelMeta?.contextWindow ?? 128000;
+    const loadedContext = countMessagesTokens(messages.slice(0, contextBaseLength), model);
+    const peakContext = countMessagesTokens(messages, model);
+    return {
+        toolCallCount,
+        modelCallCount,
+        tokensUsed: Math.max(loadedContext, peakContext),
+        contextWindow,
+    };
+}
+
+function buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCount, extra = {}) {
+    return {
+        ...extra,
+        stats: buildStats(llm, messages, contextBaseLength, toolCallCount, modelCallCount),
+        turnMessages: extractTurnMessages(messages, contextBaseLength),
+    };
+}
+
+function toolSignature(name, args) {
+    return `${name}:${JSON.stringify(args)}`;
+}
+
+const FORCE_REPLY_HINT = "You have enough tool output. Stop calling tools. Reply to the user in plain text now using results you already have.";
+const EMPTY_REPLY_HINT =
+    "Your previous assistant reply was empty. Reply to the user in plain text now. Summarize what you accomplished and answer their request.";
+
+function pushToolResult(messages, toolCallId, result) {
+    messages.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: toolResultContent(result),
+    });
+}
+
+function pushSkippedToolResults(messages, toolCalls, startIndex = 0) {
+    for (let i = startIndex; i < toolCalls.length; i += 1) {
+        pushToolResult(messages, toolCalls[i].id, { ok: false, aborted: true, error: "Stopped by user." });
+    }
+}
+
+function finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, { partialText = null } = {}) {
+    return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+        text: partialText?.trim() || null,
+        error: "stopped_by_user",
+    });
+}
+
+function isStoppedError(err, session) {
+    return Boolean(session?.isAborted?.() || err?.name === "AbortError");
+}
+
+function shouldStop(session) {
+    return Boolean(session?.isAborted?.());
+}
+
+async function completeTextReply(llm, messages, { onTextDelta, setStatus, maxRetries, modelCallCount, session, partialTextRef }) {
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        if (shouldStop(session)) return null;
+
+        if (attempt > 0) {
+            messages.push({ role: "user", content: EMPTY_REPLY_HINT });
+        }
+
+        setStatus("thinking");
+        const streamDelta = onTextDelta
+            ? (_delta, full) => {
+                  if (partialTextRef) partialTextRef.value = full;
+                  setStatus("streaming");
+                  onTextDelta(_delta, full);
+              }
+            : undefined;
+
+        modelCallCount.value += 1;
+        let response;
+        try {
+            response = await llm.complete({
+                messages,
+                tool_choice: "none",
+                stream: Boolean(onTextDelta),
+                onTextDelta: streamDelta,
+                signal: session?.signal,
+            });
+        } catch (err) {
+            if (isStoppedError(err, session)) {
+                if (partialTextRef && err.partialText) partialTextRef.value = err.partialText;
+                return null;
+            }
+            throw err;
+        }
+
+        if (shouldStop(session)) return null;
+
+        const raw = response.choices?.[0]?.message;
+        if (!raw) continue;
+
+        const msg = assistantMessageToPlain(raw);
+        if (msg.content?.trim()) {
+            messages.push(msg);
+            return { text: msg.content, usage: response.usage };
+        }
+    }
+
+    return null;
+}
+
+export async function runAgent(userMessage, options = {}) {
+    try {
+        return await runAgentTurn(userMessage, options);
+    } catch (err) {
+        if (isStoppedError(err, options.session)) {
+            return {
+                text: err.partialText?.trim() || null,
+                error: "stopped_by_user",
+                stats: { toolCallCount: 0, modelCallCount: 0, tokensUsed: 0, contextWindow: 128000 },
+                turnMessages: [],
+            };
+        }
+        console.error("Agent loop error:", err?.stack || err);
+        return {
+            text: null,
+            error: "agent_error",
+            errorDetail: err?.message || String(err),
+            stats: { toolCallCount: 0, modelCallCount: 0, tokensUsed: 0, contextWindow: 128000 },
+            turnMessages: [],
+        };
+    }
+}
+
+async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase, visionAttachment = null, session = null } = {}) {
+    const llm = await createLlmClient();
+    const agentConfig = loadAgentConfig();
+    const setStatus = (phase, detail = null) => onStatusPhase?.(phase, detail);
+    const maxRounds = agentConfig.maxToolRoundsPerTurn ?? agentConfig.maxToolRounds ?? 16;
+    const maxToolCalls = agentConfig.maxToolCallsPerTurn ?? 20;
+    const maxSameToolRepeat = agentConfig.maxSameToolRepeat ?? 2;
+    const maxEmptyReplyRetries = agentConfig.maxEmptyReplyRetries ?? 8;
+    const modelCallCountRef = { value: 0 };
+
+    setStatus("generating");
+    let messages = await ensureWithinContextLimit(llm, userMessage, llm.modelMeta, {
+        sessionId,
+        onStatusPhase: setStatus,
+        visionAttachment,
+        session,
+    });
+
+    if (shouldStop(session)) {
+        return finishStoppedTurn(llm, messages, messages.length, 0, modelCallCountRef, { partialText: null });
+    }
+    const tools = getAllToolDefinitions();
+    const contextBaseLength = messages.length;
+
+    let toolCallCount = 0;
+    const toolSigCounts = new Map();
+    const fileSnapshots = new Map();
+    let forceReplyNext = false;
+
+    const partialTextRef = { value: null };
+
+    for (let round = 0; round < maxRounds; round++) {
+        if (shouldStop(session)) {
+            return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                partialText: partialTextRef.value,
+            });
+        }
+
+        const toolsEnabled = !forceReplyNext;
+        const useStream = Boolean(onTextDelta);
+
+        setStatus("thinking");
+
+        const streamDelta =
+            useStream && onTextDelta
+                ? (_delta, full) => {
+                      partialTextRef.value = full;
+                      setStatus("streaming");
+                      onTextDelta(_delta, full);
+                  }
+                : undefined;
+
+        modelCallCountRef.value += 1;
+        let response;
+        try {
+            response = await llm.complete({
+                messages,
+                tools: toolsEnabled ? tools : undefined,
+                tool_choice: toolsEnabled ? "auto" : "none",
+                stream: useStream,
+                onTextDelta: streamDelta,
+                signal: session?.signal,
+            });
+        } catch (err) {
+            if (isStoppedError(err, session)) {
+                if (err.partialText) partialTextRef.value = err.partialText;
+                return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                    partialText: partialTextRef.value,
+                });
+            }
+            throw err;
+        }
+
+        if (shouldStop(session)) {
+            return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                partialText: partialTextRef.value,
+            });
+        }
+
+        forceReplyNext = false;
+
+        const raw = response.choices?.[0]?.message;
+        if (!raw) throw new Error("Empty LLM response");
+
+        const choice = assistantMessageToPlain(raw);
+        const toolCalls = choice.tool_calls;
+        if (!toolCalls?.length) {
+            if (choice.content?.trim()) {
+                messages.push(choice);
+                return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+                    text: choice.content,
+                    usage: response.usage,
+                });
+            }
+
+            if (shouldStop(session)) {
+                return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                    partialText: partialTextRef.value,
+                });
+            }
+
+            const recovered = await completeTextReply(llm, messages, {
+                onTextDelta,
+                setStatus,
+                maxRetries: maxEmptyReplyRetries,
+                modelCallCount: modelCallCountRef,
+                session,
+                partialTextRef,
+            });
+            if (shouldStop(session)) {
+                return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                    partialText: partialTextRef.value || recovered?.text,
+                });
+            }
+            if (recovered) {
+                return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+                    text: recovered.text,
+                    usage: recovered.usage,
+                });
+            }
+
+            return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+                text: null,
+                error: "empty_reply_exhausted",
+            });
+        }
+
+        messages.push(choice);
+
+        if (toolCallCount >= maxToolCalls) {
+            messages.push({ role: "user", content: FORCE_REPLY_HINT });
+            forceReplyNext = true;
+            continue;
+        }
+
+        for (const tc of toolCalls) {
+            if (toolCallCount >= maxToolCalls) break;
+
+            if (shouldStop(session)) {
+                pushSkippedToolResults(messages, toolCalls, toolCalls.indexOf(tc));
+                return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                    partialText: partialTextRef.value,
+                });
+            }
+
+            setStatus("tools", tc.function.name);
+
+            const args = parseToolArgs(tc.function.arguments);
+            const sig = toolSignature(tc.function.name, args);
+            const seen = (toolSigCounts.get(sig) || 0) + 1;
+            toolSigCounts.set(sig, seen);
+            toolCallCount += 1;
+
+            if (seen > maxSameToolRepeat) {
+                messages.push({
+                    role: "tool",
+                    tool_call_id: tc.id,
+                    content: toolResultContent({
+                        error: "Duplicate tool call skipped. Use the previous result and answer the user without calling this again.",
+                    }),
+                });
+                forceReplyNext = true;
+                continue;
+            }
+
+            const result = await executeTool(tc.function.name, args, {
+                sessionId,
+                messages,
+                model: llm.provider.model,
+                modelMeta: llm.modelMeta,
+                fileSnapshots,
+                signal: session?.signal,
+            });
+
+            if (shouldStop(session)) {
+                pushToolResult(messages, tc.id, result);
+                pushSkippedToolResults(messages, toolCalls, toolCalls.indexOf(tc) + 1);
+                return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+                    partialText: partialTextRef.value,
+                });
+            }
+            pushToolResult(messages, tc.id, result);
+        }
+
+        if (forceReplyNext || toolCallCount >= maxToolCalls) {
+            messages.push({ role: "user", content: FORCE_REPLY_HINT });
+            forceReplyNext = true;
+        }
+    }
+
+    messages.push({ role: "user", content: FORCE_REPLY_HINT });
+
+    if (shouldStop(session)) {
+        return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+            partialText: partialTextRef.value,
+        });
+    }
+
+    const recovered = await completeTextReply(llm, messages, {
+        onTextDelta,
+        setStatus,
+        maxRetries: maxEmptyReplyRetries,
+        modelCallCount: modelCallCountRef,
+        session,
+        partialTextRef,
+    });
+    if (shouldStop(session)) {
+        return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
+            partialText: partialTextRef.value || recovered?.text,
+        });
+    }
+    if (recovered) {
+        return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+            text: recovered.text,
+            usage: recovered.usage,
+        });
+    }
+
+    return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+        text: null,
+        error: "tool_rounds_exceeded",
+    });
+}

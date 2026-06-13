@@ -1,0 +1,21 @@
+{
+    "name": "arona-desktop",
+    "productName": "AronaDesktop",
+    "version": "0.1.0",
+    "type": "module",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron .",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.12.1",
+        "electron": "^42.4.0",
+        "js-tiktoken": "^1.0.19",
+        "openai": "^6.42.0"
+    },
+    "devDependencies": {
+        "prettier": "^3.8.4"
+    }
+}

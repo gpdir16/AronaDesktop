@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+    <head>
+        <meta charset="UTF-8" />
+        <meta
+            http-equiv="Content-Security-Policy"
+            content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self';"
+        />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Arona Desktop</title>
+        <link rel="stylesheet" href="/renderer/styles.css" />
+    </head>
+    <body>
+        <main class="app-shell">
+            <canvas id="scene-canvas" aria-label="Spine character"></canvas>
+            <section class="conversation" aria-label="대화">
+                <div id="chat-messages" class="conversation-messages"></div>
+                <form id="chat-form" class="conversation-compose">
+                    <input id="chat-input" type="text" autocomplete="off" />
+                </form>
+            </section>
+        </main>
+
+        <script type="module" src="/renderer/app.js"></script>
+    </body>
+</html>
