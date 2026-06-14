@@ -1,10 +1,11 @@
 import { loadAgentConfig } from "../config-loader.js";
 import { createLlmClient } from "../llm/client.js";
-import { assistantMessageToPlain } from "../llm/messages.js";
+import { assistantMessageToPlain, reconcileAssistantContent } from "../llm/messages.js";
 import { executeTool, getAllToolDefinitions, toolResultContent } from "./tool-registry.js";
 import { extractTurnMessages } from "./chat-history.js";
 import { ensureWithinContextLimit } from "./summarize.js";
 import { countMessagesTokens } from "./context.js";
+import { buildVisionInjectionMessage } from "../llm/vision.js";
 function parseToolArgs(raw) {
     try {
         return JSON.parse(raw || "{}");
@@ -38,7 +39,8 @@ function toolSignature(name, args) {
     return `${name}:${JSON.stringify(args)}`;
 }
 
-const FORCE_REPLY_HINT = "You have enough tool output. Stop calling tools. Reply to the user in plain text now using results you already have.";
+const FORCE_REPLY_HINT =
+    "You have enough tool output. Do not repeat the same tool call. Continue with different tools if more work is needed, reply briefly only if the user needs an update, or finish silently if the task is complete.";
 const EMPTY_REPLY_HINT =
     "Your previous assistant reply was empty. Reply to the user in plain text now. Summarize what you accomplished and answer their request.";
 
@@ -48,6 +50,11 @@ function pushToolResult(messages, toolCallId, result) {
         tool_call_id: toolCallId,
         content: toolResultContent(result),
     });
+}
+
+function maybeInjectVisionMessage(messages, result, modelMeta) {
+    if (!result?.visionImage || !modelMeta?.supportsVision) return;
+    messages.push(buildVisionInjectionMessage(result.visionImage, result.visionCaption));
 }
 
 function pushSkippedToolResults(messages, toolCalls, startIndex = 0) {
@@ -71,7 +78,29 @@ function shouldStop(session) {
     return Boolean(session?.isAborted?.());
 }
 
-async function completeTextReply(llm, messages, { onTextDelta, setStatus, maxRetries, modelCallCount, session, partialTextRef }) {
+function consumeNewSegment(needsNewSegmentRef, onSegmentStart, partialTextRef) {
+    if (!needsNewSegmentRef?.value) return;
+    needsNewSegmentRef.value = false;
+    if (partialTextRef) partialTextRef.value = null;
+    onSegmentStart?.();
+}
+
+function makeStreamDelta({ onTextDelta, onSegmentStart, setStatus, partialTextRef, needsNewSegmentRef }) {
+    if (!onTextDelta) return undefined;
+
+    return (_delta, full) => {
+        consumeNewSegment(needsNewSegmentRef, onSegmentStart, partialTextRef);
+        if (partialTextRef) partialTextRef.value = full;
+        setStatus("streaming");
+        onTextDelta(_delta, full);
+    };
+}
+
+async function completeTextReply(
+    llm,
+    messages,
+    { onTextDelta, onTextSync, onSegmentStart, setStatus, maxRetries, modelCallCount, session, partialTextRef, needsNewSegmentRef },
+) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         if (shouldStop(session)) return null;
 
@@ -80,13 +109,13 @@ async function completeTextReply(llm, messages, { onTextDelta, setStatus, maxRet
         }
 
         setStatus("thinking");
-        const streamDelta = onTextDelta
-            ? (_delta, full) => {
-                  if (partialTextRef) partialTextRef.value = full;
-                  setStatus("streaming");
-                  onTextDelta(_delta, full);
-              }
-            : undefined;
+        const streamDelta = makeStreamDelta({
+            onTextDelta,
+            onSegmentStart,
+            setStatus,
+            partialTextRef,
+            needsNewSegmentRef,
+        });
 
         modelCallCount.value += 1;
         let response;
@@ -111,10 +140,18 @@ async function completeTextReply(llm, messages, { onTextDelta, setStatus, maxRet
         const raw = response.choices?.[0]?.message;
         if (!raw) continue;
 
+        consumeNewSegment(needsNewSegmentRef, onSegmentStart, partialTextRef);
         const msg = assistantMessageToPlain(raw);
-        if (msg.content?.trim()) {
-            messages.push(msg);
-            return { text: msg.content, usage: response.usage };
+        const streamedText = partialTextRef.value;
+        const reconciled = reconcileAssistantContent(msg, streamedText);
+        if (onTextSync && reconciled.content) {
+            onTextSync(reconciled.content);
+        }
+        partialTextRef.value = null;
+
+        if (reconciled.content?.trim()) {
+            messages.push(reconciled);
+            return { text: reconciled.content, usage: response.usage };
         }
     }
 
@@ -144,7 +181,10 @@ export async function runAgent(userMessage, options = {}) {
     }
 }
 
-async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase, visionAttachment = null, session = null } = {}) {
+async function runAgentTurn(
+    userMessage,
+    { sessionId, onTextDelta, onTextSync, onSegmentStart, onStatusPhase, visionAttachment = null, session = null } = {},
+) {
     const llm = await createLlmClient();
     const agentConfig = loadAgentConfig();
     const setStatus = (phase, detail = null) => onStatusPhase?.(phase, detail);
@@ -174,6 +214,7 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
     let forceReplyNext = false;
 
     const partialTextRef = { value: null };
+    const needsNewSegmentRef = { value: false };
 
     for (let round = 0; round < maxRounds; round++) {
         if (shouldStop(session)) {
@@ -183,17 +224,19 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
         }
 
         const toolsEnabled = !forceReplyNext;
-        const useStream = Boolean(onTextDelta);
+        const useStream = Boolean(onTextDelta) && !toolsEnabled;
 
         setStatus("thinking");
 
         const streamDelta =
             useStream && onTextDelta
-                ? (_delta, full) => {
-                      partialTextRef.value = full;
-                      setStatus("streaming");
-                      onTextDelta(_delta, full);
-                  }
+                ? makeStreamDelta({
+                      onTextDelta,
+                      onSegmentStart,
+                      setStatus,
+                      partialTextRef,
+                      needsNewSegmentRef,
+                  })
                 : undefined;
 
         modelCallCountRef.value += 1;
@@ -228,13 +271,28 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
         const raw = response.choices?.[0]?.message;
         if (!raw) throw new Error("Empty LLM response");
 
-        const choice = assistantMessageToPlain(raw);
+        consumeNewSegment(needsNewSegmentRef, onSegmentStart, partialTextRef);
+        const streamedText = partialTextRef.value;
+        let choice = reconcileAssistantContent(assistantMessageToPlain(raw), streamedText);
+        if (onTextSync && choice.content) {
+            onTextSync(choice.content);
+        }
+        partialTextRef.value = null;
+
         const toolCalls = choice.tool_calls;
         if (!toolCalls?.length) {
             if (choice.content?.trim()) {
                 messages.push(choice);
                 return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
                     text: choice.content,
+                    usage: response.usage,
+                });
+            }
+
+            if (toolCallCount > 0) {
+                messages.push(choice);
+                return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+                    text: null,
                     usage: response.usage,
                 });
             }
@@ -247,11 +305,14 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
 
             const recovered = await completeTextReply(llm, messages, {
                 onTextDelta,
+                onTextSync,
+                onSegmentStart,
                 setStatus,
                 maxRetries: maxEmptyReplyRetries,
                 modelCallCount: modelCallCountRef,
                 session,
                 partialTextRef,
+                needsNewSegmentRef,
             });
             if (shouldStop(session)) {
                 return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
@@ -326,7 +387,10 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
                 });
             }
             pushToolResult(messages, tc.id, result);
+            maybeInjectVisionMessage(messages, result, llm.modelMeta);
         }
+
+        needsNewSegmentRef.value = true;
 
         if (forceReplyNext || toolCallCount >= maxToolCalls) {
             messages.push({ role: "user", content: FORCE_REPLY_HINT });
@@ -344,11 +408,14 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
 
     const recovered = await completeTextReply(llm, messages, {
         onTextDelta,
+        onTextSync,
+        onSegmentStart,
         setStatus,
         maxRetries: maxEmptyReplyRetries,
         modelCallCount: modelCallCountRef,
         session,
         partialTextRef,
+        needsNewSegmentRef,
     });
     if (shouldStop(session)) {
         return finishStoppedTurn(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef, {
@@ -359,6 +426,12 @@ async function runAgentTurn(userMessage, { sessionId, onTextDelta, onStatusPhase
         return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
             text: recovered.text,
             usage: recovered.usage,
+        });
+    }
+
+    if (toolCallCount > 0) {
+        return buildResult(llm, messages, contextBaseLength, toolCallCount, modelCallCountRef.value, {
+            text: null,
         });
     }
 

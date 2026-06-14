@@ -36,3 +36,10 @@ export function assistantMessageToPlain(message) {
         tool_calls,
     };
 }
+
+/** Prefer fuller streamed text when the API message was clipped mid-stream. */
+export function reconcileAssistantContent(choice, streamedText) {
+    const apiContent = choice.content ?? "";
+    if (!streamedText || streamedText.length <= apiContent.length) return choice;
+    return { ...choice, content: streamedText || null };
+}

@@ -28,6 +28,8 @@ export async function sendMessage(message, options = {}) {
         const result = await runAgent(message, {
             sessionId,
             onTextDelta: options.onTextDelta,
+            onTextSync: options.onTextSync,
+            onSegmentStart: options.onSegmentStart,
             onStatusPhase: options.onStatusPhase,
             session,
         });

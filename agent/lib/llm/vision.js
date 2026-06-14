@@ -45,6 +45,23 @@ export function buildUserMessageContent(text, { visionEnabled = false, attachmen
     ];
 }
 
+/** Inject a captured image into the thread so the model can see it on the next step. */
+export function buildVisionInjectionMessage(attachment, caption = "Attached image:") {
+    const content = buildUserMessageContent(caption, {
+        visionEnabled: true,
+        attachment,
+    });
+
+    if (typeof content === "string") {
+        return {
+            role: "user",
+            content: attachment?.path ? `${caption}\n${attachment.path}` : caption,
+        };
+    }
+
+    return { role: "user", content };
+}
+
 /** Rough token estimate for multimodal user content (footer stats). */
 export function estimateContentTokens(content) {
     if (typeof content === "string") {

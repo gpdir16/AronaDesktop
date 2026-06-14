@@ -19,6 +19,16 @@ export function registerIpcHandlers() {
                         window.webContents.send(IPC_CHANNELS.textDelta, { delta, full });
                     }
                 },
+                onTextSync: (full) => {
+                    if (window && !window.isDestroyed()) {
+                        window.webContents.send(IPC_CHANNELS.textDelta, { sync: true, full });
+                    }
+                },
+                onSegmentStart: () => {
+                    if (window && !window.isDestroyed()) {
+                        window.webContents.send(IPC_CHANNELS.textDelta, { segmentStart: true });
+                    }
+                },
             });
 
             if (window && !window.isDestroyed()) {

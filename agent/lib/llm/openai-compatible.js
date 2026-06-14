@@ -58,9 +58,24 @@ function buildStreamMessage(content, toolCalls) {
     return message;
 }
 
-export async function chatCompletions({ client, model, messages, tools, tool_choice, stream = false, onTextDelta, signal }) {
+export async function chatCompletions({
+    client,
+    model,
+    messages,
+    tools,
+    tool_choice,
+    stream = false,
+    onTextDelta,
+    signal,
+    reasoning_effort,
+    max_tokens = 8192,
+}) {
     const includeTools = Boolean(tools?.length) && tool_choice !== "none";
-    const params = { model, messages: sanitizeMessagesForApi(messages) };
+    const params = { model, messages: sanitizeMessagesForApi(messages), max_tokens };
+
+    if (reasoning_effort) {
+        params.reasoning_effort = reasoning_effort;
+    }
 
     if (includeTools) {
         params.tools = tools;
@@ -107,11 +122,20 @@ export async function chatCompletions({ client, model, messages, tools, tool_cho
                 if (choice.finish_reason) finishReason = choice.finish_reason;
 
                 const delta = choice.delta;
-                if (!delta) continue;
+                if (delta?.tool_calls) {
+                    mergeToolCallDelta(toolCalls, delta.tool_calls);
+                }
 
-                mergeToolCallDelta(toolCalls, delta.tool_calls);
+                if (choice.message?.content && typeof choice.message.content === "string") {
+                    const finalContent = choice.message.content;
+                    if (finalContent.length > content.length) {
+                        const extra = finalContent.slice(content.length);
+                        content = finalContent;
+                        if (extra) onTextDelta(extra, content);
+                    }
+                }
 
-                if (delta.content) {
+                if (delta?.content) {
                     content += delta.content;
                     onTextDelta(delta.content, content);
                 }
@@ -145,7 +169,9 @@ export async function chatCompletions({ client, model, messages, tools, tool_cho
             },
             requestOptions,
         );
-        return completionPayload(completion);
+        const payload = completionPayload(completion);
+        emitTextOnce(onTextDelta, payload.choices[0]?.message?.content);
+        return payload;
     } catch (err) {
         if (signal?.aborted || isAbortError(err)) {
             const abortErr = new Error("Stopped by user.");
@@ -154,4 +180,9 @@ export async function chatCompletions({ client, model, messages, tools, tool_cho
         }
         throw err;
     }
+}
+
+function emitTextOnce(onTextDelta, content) {
+    if (!onTextDelta || !content) return;
+    onTextDelta(content, content);
 }

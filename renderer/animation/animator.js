@@ -104,6 +104,8 @@ export class AronaAnimator {
         this.freezeFaceEntry(entry);
         if (this.isTalking) {
             this.startTalkOverlay();
+        } else {
+            this.scheduleIdleReset();
         }
     }
 
@@ -221,15 +223,18 @@ export class AronaAnimator {
         if (!this.isTalking) return;
 
         this.isTalking = false;
-        this.expressionPlaying = false;
         this.clearTalkStartTimer();
         this.state.setEmptyAnimation(this.overlayTrack, this.mixDuration);
-        this.scheduleBlink();
+        if (!this.expressionPlaying) {
+            this.scheduleBlink();
+        }
     }
 
     onResponseEnd() {
         this.stopTalking();
-        this.scheduleIdleReset();
+        if (!this.expressionPlaying) {
+            this.scheduleIdleReset();
+        }
     }
 
     handleCommand(name) {
@@ -262,7 +267,11 @@ export class AronaAnimator {
         }
 
         const entry = this.state.setAnimation(this.faceTrack, name, false);
-        if (entry) entry.timeScale = 1;
+        if (entry) {
+            entry.trackTime = 0;
+            entry.timeScale = 1;
+            entry.trackEnd = entry.animationEnd;
+        }
     }
 
     playSequence(key) {

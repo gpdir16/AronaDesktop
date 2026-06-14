@@ -33,6 +33,7 @@ export async function createLlmClient() {
                 stream,
                 onTextDelta,
                 signal,
+                reasoning_effort: provider.reasoning_effort,
             });
         },
     };

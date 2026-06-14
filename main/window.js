@@ -28,7 +28,7 @@ export async function createMainWindow(staticServer) {
     const port = typeof address === "object" && address ? address.port : 0;
 
     const window = new BrowserWindow({
-        width: 380,
+        width: 360,
         height: 640,
         minWidth: 320,
         minHeight: 480,

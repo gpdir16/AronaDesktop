@@ -1,6 +1,6 @@
 import { $ } from "/renderer/lib/dom.js";
 import { renderMarkdown } from "/renderer/lib/markdown.js";
-import { createAnimationStreamHandler, parseAnimationTags } from "/renderer/animation/stream.js";
+import { playFirstEmotionTag, stripEmotionTags } from "/renderer/animation/stream.js";
 
 function getElectronAPI() {
     return window.electronAPI ?? null;
@@ -17,7 +17,11 @@ export function mountChatPanel(getAnimator) {
     let currentAssistantMessage = null;
     let currentAssistantRaw = "";
     let isRunning = false;
-    let streamHandler = null;
+    let segmentTagPlayed = false;
+
+    function resetSegmentTagState() {
+        segmentTagPlayed = false;
+    }
 
     function renderMessageContent(element, text, asMarkdown) {
         if (asMarkdown) {
@@ -48,33 +52,55 @@ export function mountChatPanel(getAnimator) {
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    function appendToAssistantMessage(text) {
-        if (!currentAssistantMessage || !text) return;
-        setAssistantContent(currentAssistantRaw + text);
+    function tryPlayEmotionTag(text) {
+        if (segmentTagPlayed || !text) return;
+        if (playFirstEmotionTag(text, getAnimator())) {
+            segmentTagPlayed = true;
+        }
+    }
+
+    function renderAssistantFromFull(full) {
+        if (!currentAssistantMessage || full == null) return;
+        tryPlayEmotionTag(full);
+        setAssistantContent(stripEmotionTags(full));
     }
 
     function setInputEnabled(enabled) {
         chatInput.disabled = !enabled;
     }
 
-    function beginAssistantReply() {
-        if (isRunning) return;
+    function removeCurrentAssistantBubbleIfEmpty() {
+        if (!currentAssistantMessage || currentAssistantRaw.trim()) return;
+        currentAssistantMessage.parentElement?.remove();
+        currentAssistantMessage = null;
+        currentAssistantRaw = "";
+    }
+
+    function beginNewAssistantSegment() {
+        if (currentAssistantMessage && !currentAssistantRaw.trim()) {
+            currentAssistantMessage.parentElement?.remove();
+        }
+
+        resetSegmentTagState();
         currentAssistantRaw = "";
         currentAssistantMessage = addChatMessage("", "assistant");
-        streamHandler = createAnimationStreamHandler(getAnimator());
+    }
+
+    function beginAssistantReply() {
+        if (isRunning) return;
+        resetSegmentTagState();
+        currentAssistantRaw = "";
+        currentAssistantMessage = addChatMessage("", "assistant");
         isRunning = true;
         setInputEnabled(false);
         getAnimator()?.startTalking();
     }
 
     function finishAssistantReply() {
-        if (streamHandler) {
-            const tail = streamHandler.flush();
-            if (tail) appendToAssistantMessage(tail);
-            streamHandler = null;
-        }
+        removeCurrentAssistantBubbleIfEmpty();
 
         isRunning = false;
+        resetSegmentTagState();
         setInputEnabled(true);
         getAnimator()?.onResponseEnd();
         currentAssistantMessage = null;
@@ -115,10 +141,28 @@ export function mountChatPanel(getAnimator) {
     }
 
     electronAPI.onAgentDelta((data) => {
+        if (data?.segmentStart) {
+            if (!isRunning) {
+                beginAssistantReply();
+            } else {
+                beginNewAssistantSegment();
+            }
+            return;
+        }
+
+        const full = data?.full;
+        if (full != null) {
+            if (!isRunning) {
+                beginAssistantReply();
+            }
+            renderAssistantFromFull(full);
+        }
+
+        if (data?.sync) return;
+
         if (data?.done) {
-            if (data.text && currentAssistantMessage && !currentAssistantRaw) {
-                const visible = parseAnimationTags(data.text, getAnimator());
-                setAssistantContent(visible);
+            if (data.text && currentAssistantMessage) {
+                renderAssistantFromFull(data.text);
             }
             if (data.error) {
                 addChatMessage(`Error: ${data.error}`, "system");
@@ -126,18 +170,5 @@ export function mountChatPanel(getAnimator) {
             finishAssistantReply();
             return;
         }
-
-        if (!data?.delta) return;
-
-        if (!isRunning) {
-            beginAssistantReply();
-        }
-
-        if (!streamHandler) {
-            streamHandler = createAnimationStreamHandler(getAnimator());
-        }
-
-        const visible = streamHandler.feed(data.delta);
-        appendToAssistantMessage(visible);
     });
 }

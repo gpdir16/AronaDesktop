@@ -80,5 +80,6 @@ export function getMergedProvider(userConfig) {
         apiKey: substituteEnv(userConfig?.provider?.apiKey || ""),
         model: userConfig?.provider?.model || "",
         extraHeaders: providerFile.extraHeaders || {},
+        reasoning_effort: userConfig?.provider?.reasoning_effort || providerFile.reasoning_effort || null,
     };
 }
