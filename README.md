@@ -6,6 +6,8 @@
 
 > 블루 아카이브 및 아로나의 저작권은 모두 NEXON Korea Corporation에 있으며, 이 프로젝트는 개인적인 용도로만 사용 가능합니다.
 
+<img width="185" height="269" alt="CleanShot 2026-06-15 at 18 23 42" src="https://github.com/user-attachments/assets/6bf6e1ae-6892-472f-be5a-f00418b8ddab" />
+
 ## 설치 방법
 
 macOS에서 개발 및 테스트 되었으며 Linux에서도 아마 돌아갈겁니다. Windows에서 구동은 테스트되지 않았습니다.
