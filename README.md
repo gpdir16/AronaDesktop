@@ -8,6 +8,16 @@
 
 <img width="185" height="269" alt="CleanShot 2026-06-15 at 18 23 42" src="https://github.com/user-attachments/assets/6bf6e1ae-6892-472f-be5a-f00418b8ddab" />
 
+## 진행 상황
+
+- [x] 떠다니는 윈도우 (메인 창)
+- [x] 에이전트 작업
+- [x] 2D 모델 렌더링
+- [ ] WIP: TTS (텍스트를 말로)
+- [ ] WIP: STT (말을 텍스트로)
+- [ ] WIP: 동적 모션
+- [ ] WIP: 전체 컴퓨터 제어
+
 ## 설치 방법
 
 macOS에서 개발 및 테스트 되었으며 Linux에서도 아마 돌아갈겁니다. Windows에서 구동은 테스트되지 않았습니다.
